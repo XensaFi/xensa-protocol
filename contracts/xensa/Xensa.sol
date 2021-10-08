@@ -343,7 +343,10 @@ contract Xensa is VersionedInitializable {
         //transfer to the core contract
         core.transferToReserve.value(msg.value)(_reserve, msg.sender, _amount);
 
-        minter.mintXensaToken(_reserve, msg.sender, 1, _amount, dataProvider.getReserveValues(_reserve));
+        uint256 value;
+        uint256 dec;
+        (value, dec) = dataProvider.getReserveValues(_reserve);
+        minter.mintXensaToken(_reserve, msg.sender, 1, _amount, dec, value);
         //solium-disable-next-line
         emit Deposit(_reserve, msg.sender, _amount, _referralCode, block.timestamp);
 
@@ -378,7 +381,9 @@ contract Xensa is VersionedInitializable {
 
         core.transferToUser(_reserve, _user, _amount);
 
-        minter.withdrawXensaToken(_reserve, _user, 1, _amount, false);
+        uint256 dec;
+        (, dec) = dataProvider.getReserveValues(_reserve);
+        minter.withdrawXensaToken(_reserve, _user, 1, _amount, dec, false);
         //solium-disable-next-line
         emit RedeemUnderlying(_reserve, _user, _amount, block.timestamp);
 
@@ -525,7 +530,10 @@ contract Xensa is VersionedInitializable {
         //if we reached this point, we can transfer
         core.transferToUser(_reserve, msg.sender, _amount);
 
-        minter.mintXensaToken(_reserve, msg.sender, 2, _amount, dataProvider.getReserveValues(_reserve));
+        uint256 value;
+        uint256 dec;
+        (value, dec) = dataProvider.getReserveValues(_reserve);
+        minter.mintXensaToken(_reserve, msg.sender, 2, _amount, dec, value);
         emit Borrow(
             _reserve,
             msg.sender,
@@ -615,8 +623,10 @@ contract Xensa is VersionedInitializable {
                 vars.paybackAmount,
                 addressesProvider.getTokenDistributor()
             );
-
-            minter.withdrawXensaToken(_reserve, msg.sender, 2, vars.paybackAmount, false);
+ 
+            uint256 dec;
+            (, dec) = dataProvider.getReserveValues(_reserve);
+            minter.withdrawXensaToken(_reserve, msg.sender, 2, _amount, dec, false);
             emit Repay(
                 _reserve,
                 _onBehalfOf,
@@ -660,7 +670,9 @@ contract Xensa is VersionedInitializable {
             vars.paybackAmountMinusFees
         );
 
-        minter.withdrawXensaToken(_reserve, msg.sender, 2, vars.paybackAmountMinusFees, false);
+        uint256 dec;
+        (, dec) = dataProvider.getReserveValues(_reserve);
+        minter.withdrawXensaToken(_reserve, msg.sender, 2, _amount, dec, false);
         emit Repay(
             _reserve,
             _onBehalfOf,

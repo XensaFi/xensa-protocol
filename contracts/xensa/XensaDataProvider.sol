@@ -549,11 +549,19 @@ contract XensaDataProvider is VersionedInitializable {
         external
         view
         returns (
-            uint256 values
+            uint256 values,
+            uint256 dec
         )
     {
+        UserGlobalDataLocalVars memory vars;
+        (
+            vars.reserveDecimals,
+            ,
+            ,
+        ) = core.getReserveConfiguration(_reserve);
+
+        dec = 10 ** vars.reserveDecimals;
         IPriceOracleGetter oracle = IPriceOracleGetter(addressesProvider.getPriceOracle());
         values = oracle.getAssetPrice(_reserve);
-        return values;
     }
 }

@@ -44,7 +44,19 @@ contract XensaMiner is XensaToken, IXensaMinter, Ownable {
         uint256 amount; 
         uint256 AVP; 
     }
-    mapping(address => mapping(address=>stakeInfo)) private userStakeInfo;
+    struct mintLocalVar {
+        uint256 poolStartBlock;
+        uint256 poolEndBlock;
+        uint256 groupTotalAmount;
+        uint256 groupAccPerShare;
+        uint256 groupPricePerStake;
+        uint256 userAmount;
+        uint256 userProtectAmount;
+        uint256 userPDA;
+        uint256 userReceivedPerStake;
+        uint256 userMintPending;
+        uint256 userProtectMintPending;
+    }
     constructor(address addressAp) public XensaToken("XensaToken", "XENSA") {
 	ap = IXensaAddressesProvider(addressAp); 
     }
@@ -78,6 +90,7 @@ contract XensaMiner is XensaToken, IXensaMinter, Ownable {
         uint256 accPerShare;
         uint256 pricePerStake;
         mapping (address => UserInfo) users;
+        mapping(address => mapping(address=>stakeInfo)) userStakeInfo;
     }
 
     struct PoolInfo {
@@ -101,20 +114,20 @@ contract XensaMiner is XensaToken, IXensaMinter, Ownable {
         _poolCap = _poolCap.mul(1e18);
         require(_poolCap > 0, "createPool: cap fault");
 
-	_alloced = _alloced.add(_poolCap);
+        _alloced = _alloced.add(_poolCap);
         uint256 startBlock = block.number > _startBlock ? block.number : _startBlock;
-        
+
         require(_endBlock > startBlock , "createPool: Invailed block parameters 2");
-	uint256 _bonusPerBlock = _poolCap.div(_endBlock.sub(startBlock));
+        uint256 _bonusPerBlock = _poolCap.div(_endBlock.sub(startBlock));
 
         poolInfo.push(PoolInfo({
-            poolCap: _poolCap,
-            totalAllocPoint: 0,
-            startBlock: startBlock,
-            endBlock: _endBlock,
-            bonusPerBlock: _bonusPerBlock,
-	    lockedTotal: 0,
-            ageout: false
+        poolCap: _poolCap,
+        totalAllocPoint: 0,
+        startBlock: startBlock,
+        endBlock: _endBlock,
+        bonusPerBlock: _bonusPerBlock,
+        lockedTotal: 0,
+        ageout: false
         }));
     }
 
@@ -221,7 +234,7 @@ contract XensaMiner is XensaToken, IXensaMinter, Ownable {
         uint256 endBlock,
         uint256 bonusPerBlock,
         uint256 lockedTotal) {
-        PoolInfo storage pool = poolInfo[_pid];
+        PoolInfo memory pool = poolInfo[_pid];
         poolCap = pool.poolCap;
         totalAllocPoint = pool.totalAllocPoint;
         startBlock = pool.startBlock;
@@ -230,11 +243,9 @@ contract XensaMiner is XensaToken, IXensaMinter, Ownable {
         lockedTotal = pool.lockedTotal;
     }
     function getGroupInfo(uint256 _pid, uint256 _gid) public view returns (uint256 gp, uint256 groupTotal, uint256 accPerShare){
-        PoolInfo storage pool = poolInfo[_pid];
-        Group storage group = pool.groups[_gid];
-        gp = group.allocPoint;
-        groupTotal = group.totalAmount;
-        accPerShare = group.accPerShare;
+        gp = poolInfo[_pid].groups[_gid].allocPoint;
+        groupTotal = poolInfo[_pid].groups[_gid].totalAmount;
+        accPerShare = poolInfo[_pid].groups[_gid].accPerShare;
     }
 
     function _deposit(uint256 _pid, uint256 _gid, address u, uint256 _amount) internal {
@@ -253,24 +264,34 @@ contract XensaMiner is XensaToken, IXensaMinter, Ownable {
         UserInfo storage user = group.users[u];
 
         uint256 multiplier = getMultiplier(user.lastWithdrawBlock, block.number, pool.startBlock, pool.endBlock);
-        uint256 pending = 0;
+        uint256 pending;
+        uint256 blackHole;
+        uint256 protectPrice; 
         if (group.totalAmount > 0) {
             pending = multiplier.mul(group.accPerShare).mul(user.amount).div(group.totalAmount);
         }
         group.totalAmount = group.totalAmount.add(_amount);
         updateGroup(_pid, _gid);
 
-        uint256 protectPrice = userGainPrice(_pid, _gid, u); 
+        (protectPrice, blackHole) = userGainPrice(_pid, _gid, u, _amount, true); 
         updateUserProtectDuration(u, user, _amount, pending, protectPrice, true);
-        pool.lockedTotal = pool.lockedTotal.sub(protectPrice); 
+        pool.lockedTotal = pool.lockedTotal.sub(protectPrice).sub(blackHole); 
 
         emit MintDeposit(u, _pid, _gid, user.amount, group.totalAmount);
     }
 
+    struct WithdrawVar {
+        uint256 fine;
+        uint256 unlockAmount;
+        uint256 flush;
+        uint256 multiplier;
+        uint256 pending;
+        uint256 protectPrice; 
+        uint256 blackHole; 
+    }
+
     function _withdraw(uint256 _pid, uint256 _gid, address u, uint256 _amount, bool unlockedOnly) internal {
-        uint256 fine = 0;
-        uint256 unlockAmount = 0;
-        uint256 flush = 0;
+        WithdrawVar memory vars; 
         PoolInfo storage pool = poolInfo[_pid];
         if (pool.ageout == false && pool.endBlock < block.number) {
             pool.ageout = true;
@@ -285,57 +306,65 @@ contract XensaMiner is XensaToken, IXensaMinter, Ownable {
             user.protectAmount = 0; 
             user.protectMintPending = 0;
         }
-        unlockAmount = user.amount.sub(user.protectAmount); 
-        require(!(unlockedOnly && unlockAmount<_amount) , "withdraw: unlocked balance not enough");
+        vars.unlockAmount = user.amount.sub(user.protectAmount); 
+        require(!(unlockedOnly && vars.unlockAmount<_amount) , "withdraw: unlocked balance not enough");
 
-        uint256 multiplier = getMultiplier(user.lastWithdrawBlock, block.number, pool.startBlock, pool.endBlock);
-        uint256 pending = multiplier.mul(group.accPerShare).mul(user.amount).div(group.totalAmount);
-        uint256 protectPrice; 
+        vars.multiplier = getMultiplier(user.lastWithdrawBlock, block.number, pool.startBlock, pool.endBlock);
+        vars.pending = vars.multiplier.mul(group.accPerShare).mul(user.amount).div(group.totalAmount);
+        vars.protectPrice; 
         {
-            protectPrice = userGainPrice(_pid, _gid, u); 
-            if (_amount>0 && unlockAmount >= _amount) {
+            (vars.protectPrice, vars.blackHole) = userGainPrice(_pid, _gid, u, _amount, false); 
+            if (_amount>0 && vars.unlockAmount >= _amount) {
                 unlockedOnly = true;
             }
         }
-        (fine, flush) = updateUserProtectDuration(u, user, 0, pending, protectPrice, unlockedOnly);
-        pool.lockedTotal = pool.lockedTotal.add(fine.div(3).mul(2)).sub(protectPrice); 
+        (vars.fine, vars.flush) = updateUserProtectDuration(u, user, 0, vars.pending, vars.protectPrice, unlockedOnly);
+        pool.lockedTotal = pool.lockedTotal.add(vars.fine.div(3).mul(2)).sub(vars.protectPrice).sub(vars.blackHole); 
         user.amount = user.amount.sub(_amount);
         group.totalAmount = group.totalAmount.sub(_amount);
-        if (fine > 0) {
-            updatePricePerStake(_pid, fine.div(3).mul(2));
-            mint(address(0xdead), fine.div(3));
+        if (vars.fine > 0) {
+            updatePricePerStake(_pid, vars.fine.div(3).mul(2));
+            mint(address(0xdead), vars.fine.div(3));
         }
 
         if (user.protectAmount > user.amount){
             user.protectAmount = user.amount;
         }
-        user.rewardDebt = user.rewardDebt.add(pending);
+        user.rewardDebt = user.rewardDebt.add(vars.pending);
         if (!pool.ageout) {
             updateGroup(_pid, _gid);
         }
 
-        emit MintWithdraw(msg.sender, _pid, _gid, _amount, group.totalAmount, flush, fine);
+        emit MintWithdraw(msg.sender, _pid, _gid, _amount, group.totalAmount, vars.flush, vars.fine);
     }
 
     function pendingXensa(uint256 _pid, uint256 _gid, address _user) public view returns (uint256 amount, uint256 protectAmount, uint256 protectBlock, uint256 pending, uint256 protectMintPending, uint256 protectPrice, uint256 lockedTotal) {
-        PoolInfo storage pool = poolInfo[_pid];
-        Group storage group = pool.groups[_gid];
-        UserInfo storage user = group.users[_user];
-        if (group.totalAmount == 0) {
+        mintLocalVar memory vars;
+        vars.poolStartBlock = poolInfo[_pid].startBlock;
+        vars.poolEndBlock = poolInfo[_pid].endBlock;
+        vars.groupTotalAmount = poolInfo[_pid].groups[_gid].totalAmount;
+        vars.groupAccPerShare = poolInfo[_pid].groups[_gid].accPerShare;
+        vars.groupPricePerStake = poolInfo[_pid].groups[_gid].pricePerStake;
+        vars.userReceivedPerStake = poolInfo[_pid].groups[_gid].users[_user].receivedPerStake;
+        vars.userAmount = poolInfo[_pid].groups[_gid].users[_user].amount;
+        vars.userProtectAmount = poolInfo[_pid].groups[_gid].users[_user].protectAmount;
+        vars.userPDA = poolInfo[_pid].groups[_gid].users[_user].PDA;
+        vars.userMintPending = poolInfo[_pid].groups[_gid].users[_user].mintPending;
+        vars.userProtectMintPending = poolInfo[_pid].groups[_gid].users[_user].protectMintPending;
+        if (vars.groupTotalAmount == 0) {
             return (0, 0, 0, 0, 0, 0, 0);
         }
-        uint256 multiplier = getMultiplier(user.lastWithdrawBlock, block.number, pool.startBlock, pool.endBlock);
-                   pending = multiplier.mul(group.accPerShare).mul(user.amount).div(group.totalAmount).add(user.mintPending);
+        uint256 multiplier = getMultiplier(poolInfo[_pid].groups[_gid].users[_user].lastWithdrawBlock, block.number, vars.poolStartBlock, vars.poolEndBlock);
+        pending = multiplier.mul(vars.groupAccPerShare).mul(vars.userAmount).div(vars.groupTotalAmount).add(vars.userMintPending);
 
-        amount = user.amount;
-        uint256 rate = _priceRate(pool, group, user);
-        protectPrice = pool.lockedTotal.mul(rate).div(1e18); 
-        if (block.number < user.PDA) {
-            protectAmount = user.protectAmount;
-            protectMintPending = multiplier.mul(group.accPerShare).mul(user.protectAmount).div(group.totalAmount).add(user.protectMintPending);
+        amount = vars.userAmount;
+        protectPrice = vars.userAmount.mul(vars.groupPricePerStake.sub(vars.userReceivedPerStake)).div(1e18); 
+        if (block.number < vars.userPDA) {
+            protectAmount = poolInfo[_pid].groups[_gid].users[_user].protectAmount;
+            protectMintPending = multiplier.mul(vars.groupAccPerShare).mul(vars.userProtectAmount).div(vars.groupTotalAmount).add(vars.userProtectMintPending);
         }
-        protectBlock = user.PDA;
-        lockedTotal = pool.lockedTotal; 
+        protectBlock = vars.userPDA;
+        lockedTotal = poolInfo[_pid].lockedTotal; 
     }
 
     function selectPool() internal view returns (uint256){
@@ -380,16 +409,30 @@ contract XensaMiner is XensaToken, IXensaMinter, Ownable {
         rate = rate.mul(u.amount.sub(protectAmount)).mul(g.allocPoint).div(p.totalAllocPoint).div(g.totalAmount); 
     }
 
-    function userGainPrice(uint256 _pid, uint256 _gid, address _u) internal returns (uint256 price) {
+    function userGainPrice(uint256 _pid, uint256 _gid, address _u, uint256 _amount, bool isDeposit) internal returns (uint256 price, uint256 blackHole) {
         PoolInfo storage p = poolInfo[_pid];
         Group storage g = p.groups[_gid];
         UserInfo storage u = g.users[_u]; 
         if (u.receivedPerStake >= g.pricePerStake) {
-            return 0;
+            return (0, 0);
         }
-        price = u.amount.mul(g.pricePerStake.sub(u.receivedPerStake)).div(1e18); 
-        u.receivedPerStake = g.pricePerStake; 
-        return price;  
+        uint256 newAmount;
+        uint256 delta;
+
+        if (block.number >= u.PDA) {
+            price = u.amount.mul(g.pricePerStake.sub(u.receivedPerStake)).div(1e18); 
+            u.receivedPerStake = g.pricePerStake; 
+        }else{
+            if (isDeposit){
+                newAmount = u.amount.add(_amount);
+                delta = u.amount.mul(g.pricePerStake.sub(u.receivedPerStake)).div(newAmount); 
+                u.receivedPerStake = g.pricePerStake.sub(delta); 
+            }else{
+                require(u.amount >= _amount, "Not enough balance to withdraw.");
+                blackHole = _amount.mul(g.pricePerStake.sub(u.receivedPerStake)).div(1e18); 
+            }
+        }
+        return (price, blackHole);  
     }
 
     function updatePricePerStake(uint256 _pid, uint256 amount) internal {
@@ -408,82 +451,72 @@ contract XensaMiner is XensaToken, IXensaMinter, Ownable {
         }
     }
 
-    function priceRate(address u) external view returns (uint256 rate) {
-        PoolInfo storage pool = poolInfo[liquidityPool];
-        uint256 _rate;
-        Group storage group = pool.groups[depositWithdraw];
-        UserInfo storage user = group.users[u];
-        if (user.amount != 0) {
-            _rate = _priceRate(pool, group, user);
-            rate = rate.add(_rate);
-        }
-    }
-
-    function mintXensaToken(address _reserve, address _user, uint256 _gid, uint256 _amount, uint256 _price) external noReentrancy onlyXensa {
+    function mintXensaToken(address _reserve, address _user, uint256 _gid, uint256 _amount, uint256 _reserveDEC, uint256 _price) external noReentrancy onlyXensa {
         if (_amount == 0 || _price == 0) {
             return;
         }
-        stakeInfo storage s = userStakeInfo[_user][_reserve];
-        s.AVP = s.AVP.mul(s.amount).add(_price.mul(_amount)).div(s.amount.add(_amount));
-        s.amount = s.amount.add(_amount);
-        uint256 workload = _amount.mul(_price);
-        _mintXensaToken(_reserve, _user, _gid, workload); 
-    }
 
-    function _mintXensaToken(address _reserve, address _user, uint256 _gid, uint256 _amount) internal {
-        if (_amount == 0) {
-            return;
-        }
         require(poolLength() >= constPoolCount, "minXensaToken: Invailed pools");
         require(_gid == depositWithdraw || _gid == borrowRepay, "minXensaToken: Invailed action");
+        uint256 pid;
         if (_reserve == lp) {
-            _deposit(liquidityPool, _gid, _user, _amount); 
-            return;
+            pid = liquidityPool;
+        }else{
+            pid = selectPool();
+            require(pid >= constPoolCount, "pool init fault");
         }
-        uint256 _pid = selectPool();
-        if (!(_pid < constPoolCount)){
-            _deposit(_pid, _gid, _user, _amount); 
-        }
+        PoolInfo storage pool = poolInfo[pid];
+        Group storage group = pool.groups[_gid];
+        stakeInfo storage s = group.userStakeInfo[_user][_reserve];
+        s.AVP = s.AVP.mul(s.amount).add(_price.mul(_amount)).div(s.amount.add(_amount));
+        s.amount = s.amount.add(_amount);
+        uint256 workload = _amount.mul(_price).div(_reserveDEC);
+        _mintXensaToken(_user, pid, _gid, workload); 
     }
 
-    function withdrawXensaToken(address _reserve, address _user, uint256 _gid, uint256 _amount, bool unlockedOnly) external noReentrancy onlyXensa {
+    function getUserReserveAVP(uint256 _pid, uint256 _gid, address _reserve, address _user ) public view returns (uint256 amount, uint256 AVP) {
+        amount = poolInfo[_pid].groups[_gid].userStakeInfo[_user][_reserve].amount;
+        AVP = poolInfo[_pid].groups[_gid].userStakeInfo[_user][_reserve].AVP;
+    }
+
+    function _mintXensaToken(address _user, uint256 _pid, uint256 _gid, uint256 _amount) internal {
         if (_amount == 0) {
             return;
         }
-        stakeInfo storage s = userStakeInfo[_user][_reserve];
-        require(s.amount>=_amount, "Not enough reserve to withdraw.");
-        s.amount = s.amount.sub(_amount);
-        uint256 workload = _amount.mul(s.AVP);
-        _withdrawXensaToken(_user, _gid, workload, unlockedOnly); 
+        _deposit(_pid, _gid, _user, _amount); 
     }
 
-    function _withdrawXensaToken(address _user, uint256 _gid, uint256 amount, bool unlockedOnly) internal {
-        if (amount == 0) {
+    function withdrawXensaToken(address _reserve, address _user, uint256 _gid, uint256 _amount, uint256 _dec,  bool unlockedOnly) external noReentrancy onlyXensa {
+        if (_amount == 0) {
             return;
         }
         require(poolLength() > constPoolCount, "minXensaToken: Invailed pools");
         require(_gid == depositWithdraw || _gid == borrowRepay, "minXensaToken: Invailed action");
+        uint256 pid;
+        if (_reserve == lp) {
+            pid = liquidityPool;
+        }else{
+            pid = selectPool();
+            require(pid >= constPoolCount, "pool init fault");
+        }
+        PoolInfo storage pool = poolInfo[pid];
+        Group storage group = pool.groups[_gid];
+
+        stakeInfo storage s = group.userStakeInfo[_user][_reserve];
+        if (s.amount<_amount) {
+            _amount = s.amount;
+        }
+        s.amount = s.amount.sub(_amount);
+        uint256 workload = _amount.mul(s.AVP).div(_dec);
+        _withdrawXensaToken(_user, pid, _gid, workload, unlockedOnly); 
+    }
+
+    function _withdrawXensaToken(address _user, uint256 _pid, uint256 _gid, uint256 _amount, bool unlockedOnly) internal {
+        if (_amount == 0) {
+            return;
+        }
         
-        uint256 _amount;
-        (_amount, , , ,) = getUserAmount(_gid, _user);
-        if (amount > _amount) {
-            amount = _amount;
-        }
-        for (uint i = poolLength()-1; i >= liquidityPool; i--) {
-            _amount = poolInfo[i].groups[_gid].users[_user].amount;
-            if (_amount > 0){
-               if (amount > _amount) {
-                    _withdraw(i, _gid, _user, _amount, unlockedOnly);
-                    amount = amount.sub(_amount);
-               } else {
-                    _withdraw(i, _gid, _user, amount, unlockedOnly);
-                    amount = 0;
-               }
-            }
-            if (amount == 0) {
-                return;
-            }
-        }
+        _withdraw(_pid, _gid, _user, _amount, unlockedOnly);
     }
 
     function _withdrawPendingXensaToken(uint256 _gid, bool unlockedOnly) public {
