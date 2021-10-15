@@ -2495,7 +2495,7 @@ contract XensaStaking is Ownable, CheckContract, BaseMath {
 
         // Transfer Xensa from caller to this contract
         bool succ = xensaToken.transferFrom(msg.sender, address(this), _XensaAmount);
-        require(succ);
+        require(succ, "Transfer from failed.");
 
         emit StakeChanged(msg.sender, newStake);
         emit Stake(msg.sender, _XensaAmount, block.timestamp);
